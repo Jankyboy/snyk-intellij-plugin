@@ -196,7 +196,7 @@ private final class StandardCliClient(tryConfig: => Try[SnykConfig], aConsoleCom
       val pattern = Pattern.compile("^\\d+\\.\\d+\\.\\d+")
       val matcher = pattern.matcher(consoleResultStr.trim)
 
-      matcher.matches()
+      matcher.find()
     } catch {
       case exception: Exception => {
         println(exception.getMessage)
