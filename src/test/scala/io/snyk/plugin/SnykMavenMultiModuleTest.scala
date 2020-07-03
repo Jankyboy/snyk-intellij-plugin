@@ -63,7 +63,7 @@ class SnykMavenMultiModuleTest extends AbstractMavenTestCase() {
 
     assertEquals(3, snykVulnResponseSeq.size)
 
-    assertEquals("SNYK-JAVA-ORGCODEHAUSJACKSON-534878",
+    assertEquals("SNYK-JAVA-LOG4J-572732",
       snykVulnResponseSeq(0).vulnerabilities.get(0).asInstanceOf[SecurityVuln].id)
     assertEquals("SNYK-JAVA-ORGSPRINGFRAMEWORK-559346",
       snykVulnResponseSeq(1).vulnerabilities.get(0).asInstanceOf[SecurityVuln].id)
@@ -93,7 +93,7 @@ class SnykMavenMultiModuleTest extends AbstractMavenTestCase() {
 
     assertEquals(3, snykVulnResponseSeq.size)
 
-    assertEquals("SNYK-JAVA-ORGCODEHAUSJACKSON-534878",
+    assertEquals("SNYK-JAVA-LOG4J-572732",
       snykVulnResponseSeq(0).vulnerabilities.get(0).asInstanceOf[SecurityVuln].id)
     assertEquals("SNYK-JAVA-ORGSPRINGFRAMEWORK-559346",
       snykVulnResponseSeq(1).vulnerabilities.get(0).asInstanceOf[SecurityVuln].id)

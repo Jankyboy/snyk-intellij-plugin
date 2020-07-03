@@ -55,7 +55,7 @@ class SnykCliClientTest extends AbstractMavenTestCase() {
     val vulnerabilities = snykVulnResponse.get.head.vulnerabilities
 
     assertEquals("One vulnerability expected", 1, vulnerabilities.size)
-    assertEquals("org.codehaus.jackson:jackson-mapper-asl",
+    assertEquals("log4j:log4j",
       vulnerabilities.head.head.asInstanceOf[SecurityVuln].moduleName)
   }
 
@@ -408,8 +408,8 @@ class SnykCliClientTest extends AbstractMavenTestCase() {
 
     val vulnerabilities = snykVulnResponse.get.head.vulnerabilities
 
-    assertEquals("One vulnerability expected", 1, vulnerabilities.size)
-    assertEquals("org.codehaus.jackson:jackson-mapper-asl",
+    assertEquals("One vulnerabilitiy expected", 1, vulnerabilities.size)
+    assertEquals("log4j:log4j",
                  vulnerabilities.head.head.asInstanceOf[SecurityVuln].moduleName)
   }
 }
