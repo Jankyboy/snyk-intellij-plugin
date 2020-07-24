@@ -76,6 +76,8 @@
         <projectService serviceImplementation="io.snyk.plugin.ui.settings.SnykPersistentStateComponent"/>
 
         <postStartupActivity implementation="io.snyk.plugin.SnykPostStartupActivity"/>
+
+        <facetType implementation="io.snyk.plugin.facet.SnykFacetType"/>
     </extensions>
 
     <actions>

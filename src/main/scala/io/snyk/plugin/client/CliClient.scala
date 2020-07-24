@@ -20,9 +20,12 @@ import scala.util.{Failure, Success, Try}
 import java.nio.file.{Files, Paths}
 import java.util.regex.Pattern
 
+import com.intellij.facet.FacetManager
+import com.intellij.openapi.module.ModuleManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.SystemInfo
 import io.snyk.plugin.depsource.ProjectType
+import io.snyk.plugin.facet.{SnykFacet, SnykFacetConfiguration}
 import io.snyk.plugin.ui.settings.SnykPersistentStateComponent
 import monix.execution.atomic.Atomic
 
@@ -67,9 +70,11 @@ sealed trait CliClient {
    * Build list of commands for run Snyk CLI command.
    * @param settings           - Snyk IntelliJ settings
    * @param projectDependency  - Information about project dependencies.
-   * @return
+   * @param project            - IntelliJ project instance
+    *
+   * @return Array
    */
-  def buildCliCommandsList(settings: SnykPersistentStateComponent, projectDependency: ProjectDependency): util.ArrayList[String]
+  def buildCliCommandsList(project: Project, settings: SnykPersistentStateComponent, projectDependency: ProjectDependency): util.ArrayList[String]
 
   /**
     * Check is CLI installed by plugin: if CLI file exists in plugin directory.
@@ -148,7 +153,7 @@ private final class StandardCliClient(
     try {
       val projectPath = project.getBasePath
 
-      val snykResultJsonStr = requestCli(projectPath, buildCliCommandsList(settings, projectDependency))
+      val snykResultJsonStr = requestCli(projectPath, buildCliCommandsList(project, settings, projectDependency))
 
       // Description: if project is one module project Snyk CLI will return JSON object.
       // If project is multi-module project Snyk CLI will return array of JSON objects.
@@ -277,7 +282,7 @@ private final class StandardCliClient(
     json <- decode[SnykUserResponse](jsonStr).toTry
   } yield json.user
 
-  override def buildCliCommandsList(settings: SnykPersistentStateComponent, projectDependency: ProjectDependency): util.ArrayList[String] = {
+  override def buildCliCommandsList(project: Project, settings: SnykPersistentStateComponent, projectDependency: ProjectDependency): util.ArrayList[String] = {
     val commands: util.ArrayList[String] = new util.ArrayList[String]
     commands.add(snykCliCommandPath)
     commands.add("--json")
@@ -285,7 +290,7 @@ private final class StandardCliClient(
     val customEndpoint = settings.customEndpointUrl
 
     if (customEndpoint != null && customEndpoint.nonEmpty) {
-      commands.add(s"--api=${customEndpoint}")
+      commands.add(s"--api=$customEndpoint")
     }
 
     if (settings.isIgnoreUnknownCA) {
@@ -295,12 +300,30 @@ private final class StandardCliClient(
     val organization = settings.organization
 
     if (organization != null && organization.nonEmpty) {
-      commands.add(s"--org=${organization}")
+      commands.add(s"--org=$organization")
     }
 
-    projectDependency.projectType match {
-      case ProjectType.MAVEN => commands.add("--all-projects")
-      case ProjectType.GRADLE => commands.add("--all-sub-projects")
+    val packageManagerFiles: util.ArrayList[String] = new util.ArrayList[String]
+
+    ModuleManager.getInstance(project).getModules.foreach(module => {
+      FacetManager.getInstance(module).getAllFacets.foreach(facet => {
+        if (facet.isInstanceOf[SnykFacet]) {
+          val fileName = facet.getConfiguration.asInstanceOf[SnykFacetConfiguration].getState.fileName
+
+          if (fileName != null && fileName.nonEmpty) {
+            packageManagerFiles.add(module.getModuleFile.getParent.getPath + "/" + fileName)
+          }
+        }
+      })
+    })
+
+    if (!packageManagerFiles.isEmpty) {
+      packageManagerFiles.forEach(fileName => commands.add(s"--file=$fileName"))
+    } else {
+      projectDependency.projectType match {
+        case ProjectType.MAVEN => commands.add("--all-projects")
+        case ProjectType.GRADLE => commands.add("--all-sub-projects")
+      }
     }
 
     commands.add("test")
@@ -352,9 +375,12 @@ private final class MockCliClient(
    *
    * @param settings          - Snyk IntelliJ settings
    * @param projectDependency - Information about project dependencies.
-   * @return
+   * @param project           - IntelliJ project
+   *
+   * @return Array
    */
   override def buildCliCommandsList(
+    project: Project,
     settings: SnykPersistentStateComponent,
     projectDependency: ProjectDependency): util.ArrayList[String] = new util.ArrayList[String]()
 
