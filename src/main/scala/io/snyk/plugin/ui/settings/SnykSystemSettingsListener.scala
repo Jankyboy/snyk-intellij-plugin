@@ -1,0 +1,5 @@
+package io.snyk.plugin.ui.settings
+
+import com.intellij.openapi.externalSystem.settings.ExternalSystemSettingsListener
+
+trait SnykSystemSettingsListener extends ExternalSystemSettingsListener[SnykProjectSettings]
