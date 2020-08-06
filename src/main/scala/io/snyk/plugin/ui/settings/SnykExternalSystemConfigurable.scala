@@ -5,12 +5,14 @@ import com.intellij.openapi.externalSystem.util.ExternalSystemSettingsControl
 import com.intellij.openapi.project.Project
 
 class SnykExternalSystemConfigurable(project: Project)
-  extends AbstractExternalSystemConfigurable[SnykProjectSettings, SnykSystemSettingsListener, SnykSystemSettings](project, SnykProjectSystemId.Id) {
+  extends AbstractExternalSystemConfigurable[SnykProjectSettings, SnykSystemSettingsListener, SnykSharedProjectLevelSettings](project, SnykConstants.SystemId) {
+
+  val snykSystemSettings = SnykSystemSettings.getInstance(project)
 
   override def createProjectSettingsControl(settings: SnykProjectSettings): ExternalSystemSettingsControl[SnykProjectSettings] =
     new SnykProjectSettingsControl(settings)
 
-  override def createSystemSettingsControl(settings: SnykSystemSettings): ExternalSystemSettingsControl[SnykSystemSettings] =
+  override def createSystemSettingsControl(settings: SnykSharedProjectLevelSettings): ExternalSystemSettingsControl[SnykSharedProjectLevelSettings] =
     new SnykSystemSettingsControl(settings)
 
   override def newProjectSettings(): SnykProjectSettings = new SnykProjectSettings

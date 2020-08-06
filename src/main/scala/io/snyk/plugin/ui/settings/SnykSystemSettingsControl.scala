@@ -2,7 +2,7 @@ package io.snyk.plugin.ui.settings
 
 import com.intellij.openapi.externalSystem.util.{ExternalSystemSettingsControl, PaintAwarePanel}
 
-class SnykSystemSettingsControl(settings: SnykSystemSettings) extends ExternalSystemSettingsControl[SnykSystemSettings] {
+class SnykSystemSettingsControl(settings: SnykSharedProjectLevelSettings) extends ExternalSystemSettingsControl[SnykSharedProjectLevelSettings] {
 
   override def fillUi(canvas: PaintAwarePanel, indentLevel: Int): Unit = {
 
@@ -14,11 +14,11 @@ class SnykSystemSettingsControl(settings: SnykSystemSettings) extends ExternalSy
 
   override def isModified: Boolean = false
 
-  override def apply(settings: SnykSystemSettings): Unit = {
+  override def apply(settings: SnykSharedProjectLevelSettings): Unit = {
 
   }
 
-  override def validate(settings: SnykSystemSettings): Boolean = true
+  override def validate(settings: SnykSharedProjectLevelSettings): Boolean = true
 
   override def disposeUIResources(): Unit = {
 

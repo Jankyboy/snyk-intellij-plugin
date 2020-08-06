@@ -1,50 +1,85 @@
 package io.snyk.plugin.ui.settings
 
-import java.util
-import java.util.Set
+import java.time.LocalDate
 
-import io.snyk.plugin.IntellijLogging
-import com.intellij.openapi.externalSystem.settings.{AbstractExternalSystemSettings, ExternalSystemSettingsListener}
+import com.intellij.openapi.components.{PersistentStateComponent, ServiceManager, State, Storage}
 import com.intellij.openapi.project.Project
-import com.intellij.openapi.components.{PersistentStateComponent, State, Storage}
-import com.intellij.openapi.externalSystem.settings.AbstractExternalSystemSettings.{State => ExternalSystemState}
-import com.intellij.util.containers.ContainerUtilRt
-import com.intellij.util.xmlb.annotations.XCollection
-import org.jetbrains.plugins.gradle.settings.GradleProjectSettings
+import org.jetbrains.annotations.Nullable
 
-/**
-  * Holds shared project-level snyk-related settings (should be kept at the '*.ipr' or under '.idea').
-  */
-@State(name = "SnykSettings", storages = Array(new Storage("snyk.xml")))
-class SnykSystemSettings(project: Project)
-  extends AbstractExternalSystemSettings[SnykSystemSettings, SnykProjectSettings, SnykSystemSettingsListener](SnykSettingsTopic.Topic, project)
-    with IntellijLogging
-    with PersistentStateComponent[SnykSystemSettingsState] {
+@State(name = "SnykSystemSettings", storages = Array(new Storage("snyk.system.xml")))
+class SnykSystemSettings extends PersistentStateComponent[SnykIntelliJSettingsState] {
 
-  override def subscribe(listener: ExternalSystemSettingsListener[SnykProjectSettings]): Unit =
-    project.getMessageBus.connect(project).subscribe(SnykSettingsTopic.Topic, new SnykSystemSettingsListenerAdapter(listener))
+  private var snykIntelliJSettingsState = SnykIntelliJSettingsState.Empty
 
-  override def copyExtraSettingsFrom(settings: SnykSystemSettings): Unit = {
-    log.info("copyExtraSettingsFrom")
-  }
+  override def getState: SnykIntelliJSettingsState = snykIntelliJSettingsState
 
-  override def checkSettings(old: SnykProjectSettings, current: SnykProjectSettings): Unit = {
-    log.info("checkSettings")
-  }
+  override def loadState(state: SnykIntelliJSettingsState) = snykIntelliJSettingsState = state
 
-  override def getState: SnykSystemSettingsState = new SnykSystemSettingsState
+  def customEndpointUrl: String = snykIntelliJSettingsState.customEndpointUrl
 
-  override def loadState(state: SnykSystemSettingsState): Unit = super.loadState(state)
+  def setCustomEndpointUrl(newEndpoint: String) = snykIntelliJSettingsState.customEndpointUrl = newEndpoint
+
+  def organization: String = snykIntelliJSettingsState.organization
+
+  def setOrganization(newOrganization: String) = snykIntelliJSettingsState.organization = newOrganization
+
+  def isIgnoreUnknownCA: Boolean = snykIntelliJSettingsState.ignoreUnknownCA
+
+  def setIgnoreUnknownCA(newIgnoreUnknownCA: Boolean) = snykIntelliJSettingsState.ignoreUnknownCA = newIgnoreUnknownCA
+
+  def cliVersion: String = snykIntelliJSettingsState.cliVersion
+
+  def setCliVersion(newCliVersion: String) = snykIntelliJSettingsState.cliVersion = newCliVersion
+
+  def lastCheckDate: LocalDate = snykIntelliJSettingsState.lastCheckDate
+
+  def setLastCheckDate(lastCheckDate: LocalDate) = snykIntelliJSettingsState.lastCheckDate = lastCheckDate
+
+  def setAdditionalParameters(text: String) = snykIntelliJSettingsState.additionalParameters = text
+
+  def additionalParameters: String = snykIntelliJSettingsState.additionalParameters
 }
 
-class SnykSystemSettingsState extends ExternalSystemState[SnykProjectSettings] {
-  private val projectSettingsSet = ContainerUtilRt.newTreeSet
+object SnykSystemSettings {
 
-  @XCollection(elementTypes = classOf[SnykProjectSettings])
-  override def getLinkedExternalProjectsSettings: util.Set[SnykProjectSettings] = projectSettingsSet
+  def apply(): SnykPersistentStateComponent = {
+    val stateComponent = new SnykPersistentStateComponent()
 
-  override def setLinkedExternalProjectsSettings(settings: util.Set[SnykProjectSettings]): Unit =
-    if (settings != null) {
-      projectSettingsSet.addAll(settings)
-    }
+    stateComponent.loadState(SnykIntelliJSettingsState())
+
+    stateComponent
+  }
+
+  def apply(
+    customEndpointUrl: String = "",
+    organization: String = "",
+    isIgnoreUnknownCA: Boolean = false,
+    cliVersion: String = "",
+    lastCheckDate: LocalDate = null,
+    additionalParameters: String = ""): SnykPersistentStateComponent = {
+
+    val stateComponent = SnykPersistentStateComponent()
+
+    stateComponent.setCustomEndpointUrl(customEndpointUrl)
+    stateComponent.setOrganization(organization)
+    stateComponent.setIgnoreUnknownCA(isIgnoreUnknownCA)
+    stateComponent.setCliVersion(cliVersion)
+    stateComponent.setLastCheckDate(lastCheckDate)
+    stateComponent.setAdditionalParameters(additionalParameters)
+
+    stateComponent
+  }
+
+  val Empty: SnykPersistentStateComponent = {
+    val snykPersistentStateComponent: SnykPersistentStateComponent = new SnykPersistentStateComponent()
+    snykPersistentStateComponent.loadState(SnykIntelliJSettingsState.Empty)
+
+    snykPersistentStateComponent
+  }
+
+  @Nullable
+  def getInstance(project: Project): SnykPersistentStateComponent =
+    ServiceManager.getService(project, classOf[SnykPersistentStateComponent])
+
+  def getInstance: SnykSystemSettings = ServiceManager.getService(classOf[SnykSystemSettings])
 }

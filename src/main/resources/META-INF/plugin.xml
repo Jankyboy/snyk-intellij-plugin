@@ -65,6 +65,7 @@
     <depends>com.intellij.modules.lang</depends>
     <depends>com.intellij.modules.platform</depends>
     <depends>com.intellij.modules.java</depends>
+    <depends>com.intellij.modules.externalSystem</depends>
 
     <extensions defaultExtensionNs="com.intellij">
         <toolWindow id="Snyk" secondary="true" icon="/icons/plus.png" anchor="right" factoryClass="io.snyk.plugin.ui.SnykToolWindowFactory"/>
@@ -74,6 +75,16 @@
 
         <projectConfigurable id="preference.SnykConfigurable" instance="io.snyk.plugin.ui.settings.SnykConfigurable" groupId="tools" displayName="Snyk"/>
         <projectService serviceImplementation="io.snyk.plugin.ui.settings.SnykPersistentStateComponent"/>
+
+        <externalSystemManager implementation="io.snyk.plugin.ui.settings.SnykExternalSystemManager"/>
+
+        <projectConfigurable groupId="build.tools" id="reference.settingsdialog.project.snyk"
+                             instance="io.snyk.plugin.ui.settings.SnykExternalSystemConfigurable"/>
+
+        <applicationService serviceImplementation="io.snyk.plugin.ui.settings.SnykSystemSettings"/>
+
+        <projectService serviceImplementation="io.snyk.plugin.ui.settings.SnykSharedProjectLevelSettings"/>
+        <projectService serviceImplementation="io.snyk.plugin.ui.settings.SnykLocalSettings"/>
 
         <postStartupActivity implementation="io.snyk.plugin.SnykPostStartupActivity"/>
     </extensions>
