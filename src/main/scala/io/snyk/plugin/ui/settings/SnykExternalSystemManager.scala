@@ -1,20 +1,26 @@
 package io.snyk.plugin.ui.settings
 
+import java.io.File
+
 import com.intellij.execution.configurations.SimpleJavaParameters
-import com.intellij.openapi.externalSystem.ExternalSystemManager
-import com.intellij.openapi.externalSystem.model.project.ProjectData
-import com.intellij.openapi.externalSystem.model.{DataNode, ProjectSystemId}
+import com.intellij.openapi.externalSystem.{ExternalSystemConfigurableAware, ExternalSystemManager}
+import com.intellij.openapi.externalSystem.model.project.{ModuleData, ProjectData}
+import com.intellij.openapi.externalSystem.model.{DataNode, ProjectKeys, ProjectSystemId}
 import com.intellij.openapi.externalSystem.model.task.{ExternalSystemTaskId, ExternalSystemTaskNotificationListener}
 import com.intellij.openapi.externalSystem.service.project.ExternalSystemProjectResolver
 import com.intellij.openapi.externalSystem.task.ExternalSystemTaskManager
 import com.intellij.openapi.fileChooser.FileChooserDescriptor
+import com.intellij.openapi.module.ModuleTypeManager
+import com.intellij.openapi.options.Configurable
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util
 import com.intellij.util.{Function => IntelliJFunction}
 import io.snyk.plugin.IntellijLogging
+import org.jetbrains.plugins.gradle.util.GradleConstants
 
 class SnykExternalSystemManager
   extends ExternalSystemManager[SnykProjectSettings, SnykSystemSettingsListener, SnykSharedProjectLevelSettings, SnykLocalSettings, SnykExternalSystemExecutionSettings]
+    with ExternalSystemConfigurableAware
     with IntellijLogging {
 
   override def getSystemId: ProjectSystemId = SnykConstants.SystemId
@@ -41,6 +47,8 @@ class SnykExternalSystemManager
   override def enhanceRemoteProcessing(parameters: SimpleJavaParameters): Unit = {
     log.info("enhanceRemoteProcessing")
   }
+
+  override def getConfigurable(project: Project): Configurable = new SnykExternalSystemConfigurable(project)
 }
 
 class SnykExternalSystemProjectResolver extends ExternalSystemProjectResolver[SnykExternalSystemExecutionSettings] {
@@ -51,12 +59,26 @@ class SnykExternalSystemProjectResolver extends ExternalSystemProjectResolver[Sn
     settings: SnykExternalSystemExecutionSettings,
     listener: ExternalSystemTaskNotificationListener): DataNode[ProjectData] = {
 
-    null
+    val projectFileName = new File(projectPath).getName
+    val projectData = new ProjectData(GradleConstants.SYSTEM_ID, projectFileName, projectPath, projectPath)
+
+    val projectDataNode = new DataNode[ProjectData](ProjectKeys.PROJECT, projectData, null)
+
+    projectDataNode.createChild(
+      ProjectKeys.MODULE,
+      new ModuleData(projectFileName, SnykConstants.SystemId, getDefaultModuleTypeId, projectFileName, projectPath, projectPath))
+
+    projectDataNode
+  }
+
+  def getDefaultModuleTypeId: String = {
+    val moduleType = ModuleTypeManager.getInstance.getDefaultModuleType
+    moduleType.getId
   }
 
   override def cancelTask(
     taskId: ExternalSystemTaskId,
-    listener: ExternalSystemTaskNotificationListener): Boolean = true
+    listener: ExternalSystemTaskNotificationListener) = true
 }
 
 class SnykExternalSystemTaskManager extends ExternalSystemTaskManager[SnykExternalSystemExecutionSettings] {

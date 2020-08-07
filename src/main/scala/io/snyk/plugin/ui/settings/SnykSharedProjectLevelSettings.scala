@@ -1,14 +1,17 @@
 package io.snyk.plugin.ui.settings
 
 import java.util
+import java.util.Collection
 
 import io.snyk.plugin.IntellijLogging
 import com.intellij.openapi.externalSystem.settings.{AbstractExternalSystemSettings, ExternalSystemSettingsListener}
-import com.intellij.openapi.project.Project
+import com.intellij.openapi.project.{ExternalStorageConfigurationManager, Project}
 import com.intellij.openapi.components.{PersistentStateComponent, ServiceManager, State, Storage}
 import com.intellij.openapi.externalSystem.settings.AbstractExternalSystemSettings.{State => ExternalSystemState}
+import com.intellij.util.ThreeState
 import com.intellij.util.containers.ContainerUtilRt
 import com.intellij.util.xmlb.annotations.XCollection
+
 
 /**
   * Holds shared project-level snyk-related settings (should be kept at the '*.ipr' or under '.idea').
@@ -20,7 +23,8 @@ class SnykSharedProjectLevelSettings(project: Project)
     with PersistentStateComponent[SnykSharedProjectLevelState] {
 
   override def subscribe(listener: ExternalSystemSettingsListener[SnykProjectSettings]): Unit =
-    project.getMessageBus.connect(project).subscribe(SnykSettingsTopic.Topic, new SnykSystemSettingsListenerAdapter(listener))
+    project.getMessageBus.connect(project)
+      .subscribe(SnykSettingsTopic.Topic, new SnykSystemSettingsListenerAdapter(listener))
 
   override def copyExtraSettingsFrom(settings: SnykSharedProjectLevelSettings): Unit = {
     log.info("copyExtraSettingsFrom")
@@ -32,7 +36,19 @@ class SnykSharedProjectLevelSettings(project: Project)
 
   override def getState: SnykSharedProjectLevelState = new SnykSharedProjectLevelState
 
-  override def loadState(state: SnykSharedProjectLevelState): Unit = super[AbstractExternalSystemSettings].loadState(state)
+  override def loadState(state: SnykSharedProjectLevelState): Unit =
+    super[AbstractExternalSystemSettings].loadState(state)
+
+  override def getLinkedProjectsSettings: util.Collection[SnykProjectSettings] = {
+    val settings: util.Collection[SnykProjectSettings] = super.getLinkedProjectsSettings
+    val isStoredExternally = ExternalStorageConfigurationManager.getInstance(getProject).isEnabled
+
+    settings.forEach(setting => {
+      setting.setStoreProjectFilesExternally(ThreeState.fromBoolean(isStoredExternally))
+    })
+
+    settings
+  }
 }
 
 class SnykSharedProjectLevelState extends ExternalSystemState[SnykProjectSettings] {
@@ -48,5 +64,6 @@ class SnykSharedProjectLevelState extends ExternalSystemState[SnykProjectSetting
 }
 
 object SnykSharedProjectLevelSettings {
-  def getInstance(project: Project): SnykSharedProjectLevelSettings = ServiceManager.getService(project, classOf[SnykSharedProjectLevelSettings]);
+  def getInstance(project: Project): SnykSharedProjectLevelSettings =
+    ServiceManager.getService(project, classOf[SnykSharedProjectLevelSettings]);
 }
