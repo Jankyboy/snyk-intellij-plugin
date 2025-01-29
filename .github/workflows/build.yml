@@ -1,5 +1,8 @@
 name: Build
-on: [push, pull_request]
+on:
+  push:
+    branches: [ master ]
+  pull_request:
 
 jobs:
   gradleValidation:
@@ -7,26 +10,31 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Fetch Sources
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
       - name: Gradle Wrapper Validation
-        uses: gradle/wrapper-validation-action@v1
+        uses: gradle/wrapper-validation-action@v2
 
   test:
     name: Test
     needs: gradleValidation
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
     steps:
       - name: Fetch Sources
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
-      - name: Setup Java
-        uses: actions/setup-java@v1
+      - uses: actions/setup-java@v4
+        name: Setup Java
         with:
-          java-version: 1.8
+          distribution: 'temurin' # See 'Supported distributions' for available options
+          java-version: '17'
 
       - name: Setup Gradle Cache
-        uses: actions/cache@v2
+        uses: actions/cache@v4
         with:
           path: |
             ~/.gradle/caches
@@ -38,4 +46,35 @@ jobs:
         run: ./gradlew verifyPlugin
 
       - name: Run Tests
-        run: ./gradlew clean test
+        run: ./gradlew clean check -x detekt
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+          SNYK_ORG_NAME: ${{ secrets.SNYK_ORG_NAME }}
+
+  pluginVerifier:
+    name: Plugin Verifier
+    needs: gradleValidation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch Sources
+        uses: actions/checkout@v4
+
+      # PluginVerifier has been compiled by a more recent version of the Java - Java 11.
+      # That's why, we are using not version 8 here, but 11.
+      - uses: actions/setup-java@v4
+        name: Setup Java
+        with:
+          distribution: 'temurin' # See 'Supported distributions' for available options
+          java-version: '17'
+
+      - name: Setup Gradle Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle') }}
+          restore-keys: ${{ runner.os }}-gradle
+
+      - name: Run Plugin Verifier
+        run: ./gradlew runPluginVerifier

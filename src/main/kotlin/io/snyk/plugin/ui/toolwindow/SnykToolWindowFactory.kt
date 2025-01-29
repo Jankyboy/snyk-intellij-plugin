@@ -13,10 +13,13 @@ class SnykToolWindowFactory : ToolWindowFactory, DumbAware {
 
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
         val toolWindowPanel = SnykToolWindow(project)
+        Disposer.register(SnykPluginDisposable.getInstance(), toolWindowPanel)
         val contentManager = toolWindow.contentManager
         val content = contentManager.factory.createContent(toolWindowPanel, null, false)
         contentManager.addContent(content)
+    }
 
-        Disposer.register(project, toolWindowPanel)
+    companion object {
+        const val SNYK_TOOL_WINDOW = "Snyk"
     }
 }

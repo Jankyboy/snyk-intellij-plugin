@@ -1,36 +1,122 @@
-<idea-plugin url="snyk.io">
+<!--suppress PluginXmlValidity -->
+<idea-plugin url="snyk.io" require-restart="true">
   <id>io.snyk.snyk-intellij-plugin</id>
-  <name>Snyk Vulnerability Scanner</name>
+  <name>Snyk Security</name>
   <vendor url="https://snyk.io">Snyk Ltd.</vendor>
 
   <depends>com.intellij.modules.lang</depends>
   <depends>com.intellij.modules.platform</depends>
+  <!-- optional modules -->
+  <depends optional="true" config-file="optional/withPHP.xml">com.jetbrains.php</depends>
+  <depends optional="true" config-file="optional/withGo.xml">org.jetbrains.plugins.go</depends>
+  <depends optional="true" config-file="optional/withKotlin.xml">org.jetbrains.kotlin</depends>
+  <depends optional="true" config-file="optional/withJava.xml">com.intellij.java</depends>
+  <depends optional="true" config-file="optional/withCsharp.xml">com.intellij.modules.rider</depends>
+  <depends optional="true" config-file="optional/withPython.xml">com.intellij.modules.python</depends>
+  <depends optional="true" config-file="optional/withJavaScript.xml">JavaScript</depends>
+  <depends optional="true" config-file="optional/withJSON.xml">com.intellij.modules.json</depends>
+  <depends optional="true" config-file="optional/withHCL.xml">org.intellij.plugins.hcl</depends>
+  <depends optional="true" config-file="optional/withYAML.xml">org.jetbrains.plugins.yaml</depends>
+  <depends optional="true" config-file="optional/withXML.xml">com.intellij.modules.xml</depends>
 
   <extensions defaultExtensionNs="com.intellij">
+    <checkinHandlerFactory implementation="snyk.common.PreCommitHookHandler" />
+    <codeInsight.lineMarkerProvider
+      language=""
+      implementationClass="snyk.common.annotator.SnykLineMarkerProvider"/>
+    <colorSettingsPage implementation="snyk.common.annotator.SnykAnnotationColorSettingsPage"/>
     <toolWindow id="Snyk"
                 anchor="bottom"
                 icon="SnykIcons.TOOL_WINDOW"
                 factoryClass="io.snyk.plugin.ui.toolwindow.SnykToolWindowFactory"/>
 
     <postStartupActivity implementation="io.snyk.plugin.SnykPostStartupActivity"/>
+    <postStartupActivity implementation="snyk.WelcomeNotifyActivity"/>
 
     <projectConfigurable id="io.snyk.plugin.settings.SnykProjectSettingsConfigurable"
                          instance="io.snyk.plugin.settings.SnykProjectSettingsConfigurable"
                          groupId="tools"
                          displayName="Snyk"/>
+
+    <errorHandler implementation="snyk.errorHandler.SnykErrorReportSubmitter"/>
+
+    <!-- Registry keys -->
+    <registryKey key="snyk.timeout.results.waiting"
+                 defaultValue="720000"
+                 description="Snyk timeout (milliseconds) to wait for results during scan"/>
+    <registryKey key="snyk.issuesBlockCommit"
+                 defaultValue="false"
+                 description="Block commits with a pre-commit hook, if Snyk has issues. This is best combined with Net-New findings."/>
+    <registryKey key="snyk.isDocumentationHoverEnabled"
+                 defaultValue="true"
+                 description="Show Snyk issue details additionally as documentation popup (hover)"
+                 restartRequired="false"
+    />
+
+    <notificationGroup id="Snyk" displayType="BALLOON" toolWindowId="Snyk"/>
+
+    <codeInsight.codeVisionProvider implementation="snyk.common.codevision.LSCodeVisionProvider"
+                                    id="snyk.common.codevision.LSCodeVisionProvider"/>
+
+    <config.codeVisionGroupSettingProvider implementation="snyk.common.codevision.LSCodeVisionProvider"/>
+    <platform.backend.documentation.targetProvider
+      implementation="snyk.common.lsp.hovers.LSDocumentationTargetProvider"/>
+    <externalAnnotator language="" implementationClass="snyk.common.annotator.SnykCodeAnnotator"/>
+    <externalAnnotator language="" implementationClass="snyk.common.annotator.SnykOSSAnnotator"/>
+    <externalAnnotator language="" implementationClass="snyk.common.annotator.SnykIaCAnnotator"/>
+    <editorFactoryListener implementation="snyk.common.editor.LineEndingEditorFactoryListener" id="snyk"/>
   </extensions>
 
   <actions>
-    <group id="io.snyk.plugin.ActionBar">
+    <group id="io.snyk.plugin.ScanActions">
       <action id="io.snyk.plugin.ui.actions.SnykRunScanAction"
               class="io.snyk.plugin.ui.actions.SnykRunScanAction"
-              text="Run" />
+              text="Run"/>
       <action id="io.snyk.plugin.ui.actions.SnykStopScanAction"
               class="io.snyk.plugin.ui.actions.SnykStopScanAction"
-              text="Stop" />
+              text="Stop"/>
       <action id="io.snyk.plugin.ui.actions.SnykCleanScanAction"
               class="io.snyk.plugin.ui.actions.SnykCleanScanAction"
-              text="Clean Issues" />
+              text="Clean All Results"/>
+    </group>
+
+    <group id="io.snyk.plugin.ViewActions">
+      <group id="io.snyk.plugin.ui.actions.SnykTreeScanTypeFilterActionGroup"
+             class="io.snyk.plugin.ui.actions.SnykTreeScanTypeFilterActionGroup"
+             text="Filter Results by Scan Type"
+             popup="true"
+             description="Snyk: choose scan types to display in the tree"
+             icon="AllIcons.General.Filter"/>
+    </group>
+
+    <group id="io.snyk.plugin.MiscActions">
+      <action id="io.snyk.plugin.ui.actions.SnykSettingsAction"
+              class="io.snyk.plugin.ui.actions.SnykSettingsAction"
+              text="Snyk Settings"/>
+    </group>
+
+    <group id="io.snyk.plugin.TreeFilters.Severity">
+      <action id="io.snyk.plugin.ui.actions.SnykTreeCriticalSeverityFilterAction"
+              class="io.snyk.plugin.ui.actions.SnykTreeCriticalSeverityFilterAction"
+              description="Snyk: Show Critical severity issues"/>
+      <action id="io.snyk.plugin.ui.actions.SnykTreeHighSeverityFilterAction"
+              class="io.snyk.plugin.ui.actions.SnykTreeHighSeverityFilterAction"
+              text="High Severity"
+              description="Snyk: Show High severity issues"/>
+      <action id="io.snyk.plugin.ui.actions.SnykTreeMediumSeverityFilterAction"
+              class="io.snyk.plugin.ui.actions.SnykTreeMediumSeverityFilterAction"
+              text="Medium Severity"
+              description="Snyk: Show Medium severity issues"/>
+      <action id="io.snyk.plugin.ui.actions.SnykTreeLowSeverityFilterAction"
+              class="io.snyk.plugin.ui.actions.SnykTreeLowSeverityFilterAction"
+              text="Low Severity"
+              description="Snyk: Show Low severity issues"/>
     </group>
   </actions>
+
+  <extensionPoints>
+    <extensionPoint
+      name="controllerManager"
+      interface="io.snyk.plugin.extensions.SnykControllerManager"/>
+  </extensionPoints>
 </idea-plugin>
