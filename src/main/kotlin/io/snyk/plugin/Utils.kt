@@ -257,6 +257,8 @@ fun isPreCommitCheckEnabled(): Boolean = Registry.get("snyk.issuesBlockCommit").
 
 fun isNewConfigDialogEnabled(): Boolean = Registry.get("snyk.useNewConfigDialog").asBoolean()
 
+fun isHtmlTreeViewEnabled(): Boolean = Registry.get("snyk.useHtmlTreeView").asBoolean()
+
 fun getWaitForResultsTimeout(): Long =
   Registry.intValue("snyk.timeout.results.waiting", DEFAULT_TIMEOUT_FOR_SCAN_WAITING_MS).toLong()
 
@@ -507,6 +509,14 @@ fun String.fromPathToUriString(): String =
   Paths.get(this).normalize().toUri().toASCIIString().removeSuffix()
 
 private fun String.startsWithWindowsDriveLetter(): Boolean = this.matches(Regex("^[a-zA-Z]:.*$"))
+
+fun Document.getSafeOffset(line: Int, character: Int): Int {
+  if (line < 0) return 0
+  if (line >= lineCount) return textLength
+  val lineEnd = getLineEndOffset(line)
+  val offset = getLineStartOffset(line) + character
+  return offset.coerceIn(0, lineEnd)
+}
 
 fun VirtualFile.getDocument(): Document? {
   if (ApplicationManager.getApplication().isDisposed) return null

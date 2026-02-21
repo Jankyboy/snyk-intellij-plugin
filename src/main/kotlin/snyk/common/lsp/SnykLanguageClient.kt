@@ -2,6 +2,7 @@ package snyk.common.lsp
 
 import com.google.gson.Gson
 import com.intellij.configurationStore.StoreUtil
+import com.intellij.ide.BrowserUtil
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
@@ -21,8 +22,12 @@ import io.snyk.plugin.events.SnykScanSummaryListener
 import io.snyk.plugin.events.SnykSettingsListener
 import io.snyk.plugin.events.SnykShowIssueDetailListener
 import io.snyk.plugin.events.SnykShowIssueDetailListener.Companion.SHOW_DETAIL_ACTION
+import io.snyk.plugin.events.SnykTreeViewListener
 import io.snyk.plugin.getDecodedParam
+import io.snyk.plugin.getDocument
+import io.snyk.plugin.getSafeOffset
 import io.snyk.plugin.getSyncPublisher
+import io.snyk.plugin.navigateToSource
 import io.snyk.plugin.pluginSettings
 import io.snyk.plugin.publishAsync
 import io.snyk.plugin.refreshAnnotationsForFile
@@ -257,7 +262,7 @@ class SnykLanguageClient(private val project: Project, val progressManager: Prog
   }
 
   private fun processSuccessfulScan(snykScan: SnykScanParams, scanPublisher: SnykScanListener) {
-    logger.info("Scan completed")
+    logger.debug("Scan completed")
 
     when (LsProduct.getFor(snykScan.product)) {
       LsProduct.OpenSource -> scanPublisher.scanningOssFinished()
@@ -273,6 +278,12 @@ class SnykLanguageClient(private val project: Project, val progressManager: Prog
     publishAsync(project, SnykScanSummaryListener.SNYK_SCAN_SUMMARY_TOPIC) {
       onSummaryReceived(summaryParams)
     }
+  }
+
+  @JsonNotification(value = "$/snyk.treeView")
+  fun snykTreeView(params: SnykTreeViewParams) {
+    if (disposed) return
+    publishAsync(project, SnykTreeViewListener.SNYK_TREE_VIEW_TOPIC) { onTreeViewReceived(params) }
   }
 
   @JsonNotification(value = "$/snyk.hasAuthenticated")
@@ -303,7 +314,7 @@ class SnykLanguageClient(private val project: Project, val progressManager: Prog
     // we use internal API here, as we need to force immediate persistence to ensure new
     // refresh tokens are always persisted, not only every 5 min.
     StoreUtil.saveSettings(ApplicationManager.getApplication(), true)
-    logger.info("force-saved settings")
+    logger.debug("force-saved settings")
 
     // Notify listeners that settings have changed (including token update)
     publishAsync(project, SnykSettingsListener.SNYK_SETTINGS_TOPIC) { settingsChanged() }
@@ -331,7 +342,7 @@ class SnykLanguageClient(private val project: Project, val progressManager: Prog
 
   override fun logTrace(params: LogTraceParams?) {
     if (disposed) return
-    logger.info(params?.message)
+    logger.debug(params?.message)
   }
 
   override fun showMessage(messageParams: MessageParams?) {
@@ -360,7 +371,7 @@ class SnykLanguageClient(private val project: Project, val progressManager: Prog
             TimeUnit.SECONDS,
           )
       }
-      MessageType.Log -> logger.info(messageParams.message)
+      MessageType.Log -> logger.debug(messageParams.message)
       null -> {}
     }
   }
@@ -432,27 +443,80 @@ class SnykLanguageClient(private val project: Project, val progressManager: Prog
     if (disposed) return CompletableFuture.completedFuture(ShowDocumentResult(false))
 
     val uri = URI.create(param.uri)
+    logger.debug("showDocument called with URI: ${param.uri}, scheme=${uri.scheme}")
 
-    return if (
-      uri.scheme == "snyk" &&
-        uri.getDecodedParam("product") == LsProduct.Code.longName &&
-        uri.getDecodedParam("action") == SHOW_DETAIL_ACTION
-    ) {
+    return if (uri.scheme == "snyk" && uri.getDecodedParam("action") == SHOW_DETAIL_ACTION) {
+      val productType =
+        when (LsProduct.getFor(uri.getDecodedParam("product") ?: "")) {
+          LsProduct.Code -> ProductType.CODE_SECURITY
+          LsProduct.OpenSource -> ProductType.OSS
+          LsProduct.InfrastructureAsCode -> ProductType.IAC
+          else -> null
+        }
 
       // Track whether we have successfully sent any notifications
       var success = false
-      uri.queryParameters["issueId"]?.let { issueId ->
-        val aiFixParams = AiFixParams(issueId, ProductType.CODE_SECURITY)
-        logger.debug("Publishing Snyk AI Fix notification for issue $issueId.")
-        publishAsync(project, SnykShowIssueDetailListener.SHOW_ISSUE_DETAIL_TOPIC) {
-          onShowIssueDetail(aiFixParams)
-        }
-        success = true
-      } ?: run { logger.info("Received showDocument URI with no issueID: $uri") }
+      if (productType != null) {
+        uri.queryParameters["issueId"]?.let { issueId ->
+          val aiFixParams = AiFixParams(issueId, productType)
+          logger.debug(
+            "Publishing show issue detail notification for issue $issueId, product=$productType"
+          )
+          publishAsync(project, SnykShowIssueDetailListener.SHOW_ISSUE_DETAIL_TOPIC) {
+            onShowIssueDetail(aiFixParams)
+          }
+          success = true
+        } ?: run { logger.debug("Received showDocument URI with no issueID: $uri") }
+      } else {
+        logger.info("Received showDocument URI with unknown product: $uri")
+      }
       CompletableFuture.completedFuture(ShowDocumentResult(success))
+    } else if (uri.scheme == "file") {
+      logger.debug("showDocument: navigating to file URI: ${param.uri}")
+      try {
+        val virtualFile = param.uri.toVirtualFileOrNull()
+        if (virtualFile != null && virtualFile.isValid) {
+          val selection = param.selection
+          if (selection != null) {
+            val document = virtualFile.getDocument()
+            if (document != null) {
+              val startOffset =
+                document.getSafeOffset(selection.start.line, selection.start.character)
+              val endOffset = document.getSafeOffset(selection.end.line, selection.end.character)
+              navigateToSource(project, virtualFile, startOffset, endOffset)
+              CompletableFuture.completedFuture(ShowDocumentResult(true))
+            } else {
+              logger.warn("showDocument: could not get document for ${param.uri}")
+              CompletableFuture.completedFuture(ShowDocumentResult(false))
+            }
+          } else {
+            navigateToSource(project, virtualFile, 0)
+            CompletableFuture.completedFuture(ShowDocumentResult(true))
+          }
+        } else {
+          logger.warn("showDocument: file not found: ${param.uri}")
+          CompletableFuture.completedFuture(ShowDocumentResult(false))
+        }
+      } catch (e: Exception) {
+        logger.warn("showDocument: error navigating to ${param.uri}", e)
+        CompletableFuture.completedFuture(ShowDocumentResult(false))
+      }
+    } else if (uri.scheme == "http" || uri.scheme == "https") {
+      logger.debug("showDocument: opening external URL: ${param.uri}")
+      try {
+        BrowserUtil.browse(param.uri)
+        CompletableFuture.completedFuture(ShowDocumentResult(true))
+      } catch (e: Exception) {
+        logger.warn("showDocument: error opening URL: ${param.uri}", e)
+        CompletableFuture.completedFuture(ShowDocumentResult(false))
+      }
     } else {
-      logger.debug("URI does not match Snyk scheme - passing to default handler: ${param.uri}")
-      super.showDocument(param)
+      logger.warn("showDocument: unsupported URI scheme '${uri.scheme}': ${param.uri}")
+      try {
+        return super.showDocument(param)
+      } catch (e: UnsupportedOperationException) {
+        CompletableFuture.completedFuture(ShowDocumentResult(false))
+      }
     }
   }
 }

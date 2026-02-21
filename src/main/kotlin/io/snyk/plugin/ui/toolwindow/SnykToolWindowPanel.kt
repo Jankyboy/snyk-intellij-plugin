@@ -18,6 +18,7 @@ import com.intellij.psi.PsiManager
 import com.intellij.ui.OnePixelSplitter
 import com.intellij.ui.TreeSpeedSearch
 import com.intellij.ui.TreeUIHelper
+import com.intellij.ui.jcef.JBCefApp
 import com.intellij.ui.treeStructure.Tree
 import com.intellij.util.Alarm
 import com.intellij.util.containers.Convertor
@@ -35,6 +36,7 @@ import io.snyk.plugin.getSnykCachedResultsForProduct
 import io.snyk.plugin.getSnykCliDownloaderService
 import io.snyk.plugin.getSnykTaskQueueService
 import io.snyk.plugin.isCliDownloading
+import io.snyk.plugin.isHtmlTreeViewEnabled
 import io.snyk.plugin.isIacRunning
 import io.snyk.plugin.isOssRunning
 import io.snyk.plugin.isScanRunning
@@ -52,10 +54,12 @@ import io.snyk.plugin.ui.toolwindow.nodes.root.RootOssTreeNode
 import io.snyk.plugin.ui.toolwindow.nodes.root.RootSecurityIssuesTreeNode
 import io.snyk.plugin.ui.toolwindow.nodes.root.RootTreeNodeBase
 import io.snyk.plugin.ui.toolwindow.nodes.secondlevel.ChooseBranchNode
+import io.snyk.plugin.ui.toolwindow.panels.HtmlTreePanel
 import io.snyk.plugin.ui.toolwindow.panels.IssueDescriptionPanel
 import io.snyk.plugin.ui.toolwindow.panels.SnykAuthPanel
 import io.snyk.plugin.ui.toolwindow.panels.SnykErrorPanel
 import io.snyk.plugin.ui.toolwindow.panels.StatePanel
+import io.snyk.plugin.ui.toolwindow.panels.SuggestionDescriptionPanel
 import io.snyk.plugin.ui.toolwindow.panels.SummaryPanel
 import io.snyk.plugin.ui.toolwindow.panels.TreePanel
 import io.snyk.plugin.ui.wrapWithScrollPane
@@ -86,6 +90,7 @@ class SnykToolWindowPanel(val project: Project) : JPanel(), Disposable {
     SimpleToolWindowPanel(true, true).apply { name = "descriptionPanel" }
   private val summaryPanel = SimpleToolWindowPanel(true, true).apply { name = "summaryPanel" }
   private var summaryPanelContent: SummaryPanel? = null
+  private var htmlTreePanel: HtmlTreePanel? = null
   private val logger = Logger.getInstance(this::class.java)
   private val rootTreeNode = ChooseBranchNode(project = project)
   private val rootOssTreeNode = RootOssTreeNode(project)
@@ -327,14 +332,29 @@ class SnykToolWindowPanel(val project: Project) : JPanel(), Disposable {
           override fun onShowIssueDetail(aiFixParams: AiFixParams) {
             val issueId = aiFixParams.issueId
             val product = aiFixParams.product
+            if (logger.isDebugEnabled) {
+              logger.debug("onShowIssueDetail: issueId=$issueId, product=$product")
+            }
             getSnykCachedResultsForProduct(project, product)?.let { results ->
+              if (logger.isDebugEnabled) {
+                val issueCount = results.values.sumOf { it.size }
+                logger.debug(
+                  "onShowIssueDetail: cache has ${results.size} files, $issueCount issues"
+                )
+                val sampleIds = results.values.asSequence().flatten().take(5).map { it.id }.toList()
+                logger.debug("onShowIssueDetail: first cached IDs: $sampleIds")
+              }
               results.values
-                .flatten()
-                .firstOrNull { scanIssue -> scanIssue.id == issueId }
+                .firstNotNullOfOrNull { issues -> issues.firstOrNull { it.id == issueId } }
                 ?.let { scanIssue ->
-                  logger.debug("Select node and display description for issue $issueId")
+                  if (logger.isDebugEnabled) logger.debug("onShowIssueDetail: found issue $issueId")
                   selectNodeAndDisplayDescription(scanIssue, forceRefresh = true)
-                } ?: run { logger.debug("Failed to find issue $issueId in $product cache") }
+                }
+                ?: run {
+                  if (logger.isDebugEnabled) {
+                    logger.debug("Failed to find issue $issueId in $product cache")
+                  }
+                }
             }
           }
         },
@@ -405,20 +425,20 @@ class SnykToolWindowPanel(val project: Project) : JPanel(), Disposable {
             if (selectedNode is SuggestionTreeNode) {
               if (shouldUpdateSuggestionDescriptionPanel) {
                 val newDescriptionPanel = selectedNode.getDescriptionPanel()
-                descriptionPanel.removeAll()
+                clearDescriptionPanel()
                 descriptionPanel.add(newDescriptionPanel, BorderLayout.CENTER)
               }
             } else {
-              descriptionPanel.removeAll()
+              clearDescriptionPanel()
               descriptionPanel.add(selectedNode.getDescriptionPanel(), BorderLayout.CENTER)
             }
           }
           is ErrorHolderTreeNode -> {
-            descriptionPanel.removeAll()
+            clearDescriptionPanel()
             selectedNode.getSnykError()?.let { displaySnykError(it) } ?: displayEmptyDescription()
           }
           else -> {
-            descriptionPanel.removeAll()
+            clearDescriptionPanel()
             displayEmptyDescription()
           }
         }
@@ -439,6 +459,7 @@ class SnykToolWindowPanel(val project: Project) : JPanel(), Disposable {
 
   override fun dispose() {
     isDisposed = true
+    clearDescriptionPanel()
   }
 
   // Throttle for UI refresh to avoid rapid successive refreshes
@@ -547,6 +568,7 @@ class SnykToolWindowPanel(val project: Project) : JPanel(), Disposable {
    */
   private fun scheduleDebouncedTreeRefresh(product: LsProduct) {
     if (product == LsProduct.Unknown) return
+    if (htmlTreePanel != null) return
     pendingTreeRefreshProducts.add(product)
     treeRefreshAlarm.cancelAllRequests()
     treeRefreshAlarm.addRequest({ flushPendingTreeRefreshes() }, TREE_REFRESH_DEBOUNCE_MS)
@@ -621,6 +643,7 @@ class SnykToolWindowPanel(val project: Project) : JPanel(), Disposable {
     )
 
     invokeLater { (vulnerabilitiesTree.model as DefaultTreeModel).reload() }
+    htmlTreePanel?.reset()
 
     if (reDisplayDescription) {
       displayEmptyDescription()
@@ -670,7 +693,7 @@ class SnykToolWindowPanel(val project: Project) : JPanel(), Disposable {
   fun displayAuthPanel() {
     if (isDisposed) return
     doCleanUi(false)
-    descriptionPanel.removeAll()
+    clearDescriptionPanel()
     val authPanel = SnykAuthPanel(project)
     Disposer.register(this, authPanel)
     descriptionPanel.add(authPanel, BorderLayout.CENTER)
@@ -698,7 +721,14 @@ class SnykToolWindowPanel(val project: Project) : JPanel(), Disposable {
 
     val treeSplitter = OnePixelSplitter(true, TOOL_TREE_SPLITTER_PROPORTION_KEY, 0.25f)
     treeSplitter.firstComponent = summaryPanel
-    treeSplitter.secondComponent = TreePanel(vulnerabilitiesTree)
+
+    if (isHtmlTreeViewEnabled() && JBCefApp.isSupported()) {
+      htmlTreePanel = HtmlTreePanel(project)
+      Disposer.register(this, htmlTreePanel!!)
+      treeSplitter.secondComponent = htmlTreePanel
+    } else {
+      treeSplitter.secondComponent = TreePanel(vulnerabilitiesTree)
+    }
 
     vulnerabilitiesSplitter.firstComponent = treeSplitter
     vulnerabilitiesSplitter.secondComponent = descriptionPanel
@@ -852,7 +882,7 @@ class SnykToolWindowPanel(val project: Project) : JPanel(), Disposable {
     }
 
   private fun displayNoVulnerabilitiesMessage() {
-    descriptionPanel.removeAll()
+    clearDescriptionPanel()
 
     val selectedTreeNode =
       vulnerabilitiesTree.selectionPath?.lastPathComponent as? RootTreeNodeBase ?: treeNodeStub
@@ -865,7 +895,7 @@ class SnykToolWindowPanel(val project: Project) : JPanel(), Disposable {
   }
 
   fun displayScanningMessage() {
-    descriptionPanel.removeAll()
+    clearDescriptionPanel()
 
     val selectedTreeNode =
       vulnerabilitiesTree.selectionPath?.lastPathComponent as? RootTreeNodeBase ?: treeNodeStub
@@ -880,7 +910,7 @@ class SnykToolWindowPanel(val project: Project) : JPanel(), Disposable {
   }
 
   private fun displayDownloadMessage() {
-    descriptionPanel.removeAll()
+    clearDescriptionPanel()
 
     val statePanel =
       StatePanel("Downloading Snyk CLI...", "Stop Downloading") {
@@ -909,7 +939,7 @@ class SnykToolWindowPanel(val project: Project) : JPanel(), Disposable {
       // vulnerability/suggestion already selected
       return
     }
-    descriptionPanel.removeAll()
+    clearDescriptionPanel()
 
     val selectedTreeNode =
       vulnerabilitiesTree.selectionPath?.lastPathComponent as? RootTreeNodeBase ?: treeNodeStub
@@ -921,7 +951,7 @@ class SnykToolWindowPanel(val project: Project) : JPanel(), Disposable {
   }
 
   private fun displaySnykError(snykError: SnykError) {
-    descriptionPanel.removeAll()
+    clearDescriptionPanel()
 
     descriptionPanel.add(SnykErrorPanel(snykError), BorderLayout.CENTER)
 
@@ -1017,13 +1047,38 @@ class SnykToolWindowPanel(val project: Project) : JPanel(), Disposable {
     }
   }
 
-  fun selectNodeAndDisplayDescription(scanIssue: ScanIssue, forceRefresh: Boolean) =
-    selectAndDisplayNodeWithIssueDescription(
-      { treeNode ->
-        treeNode is SuggestionTreeNode && (treeNode.userObject as ScanIssue).id == scanIssue.id
-      },
-      forceRefresh,
-    )
+  fun selectNodeAndDisplayDescription(scanIssue: ScanIssue, forceRefresh: Boolean) {
+    if (isHtmlTreeViewEnabled()) {
+      selectNodeInHtmlTreeAndShowDescription(scanIssue)
+    } else {
+      selectAndDisplayNodeWithIssueDescription(
+        { treeNode ->
+          treeNode is SuggestionTreeNode && (treeNode.userObject as ScanIssue).id == scanIssue.id
+        },
+        forceRefresh,
+      )
+    }
+  }
+
+  private fun selectNodeInHtmlTreeAndShowDescription(scanIssue: ScanIssue) {
+    htmlTreePanel?.selectNode(scanIssue.id)
+    invokeLater {
+      if (isDisposed || project.isDisposed) return@invokeLater
+      clearDescriptionPanel()
+      descriptionPanel.add(SuggestionDescriptionPanel(project, scanIssue), BorderLayout.CENTER)
+      descriptionPanel.revalidate()
+      descriptionPanel.repaint()
+    }
+  }
+
+  private fun clearDescriptionPanel() {
+    for (child in descriptionPanel.components) {
+      if (child is Disposable) {
+        Disposer.dispose(child)
+      }
+    }
+    descriptionPanel.removeAll()
+  }
 
   @TestOnly fun getRootIacIssuesTreeNode() = rootIacIssuesTreeNode
 
@@ -1036,6 +1091,11 @@ class SnykToolWindowPanel(val project: Project) : JPanel(), Disposable {
   @TestOnly fun getRootNode() = rootTreeNode
 
   @TestOnly fun getDescriptionPanel() = descriptionPanel
+
+  @TestOnly
+  fun setHtmlTreePanelForTest(panel: HtmlTreePanel?) {
+    htmlTreePanel = panel
+  }
 
   @TestOnly
   fun scheduleDebouncedTreeRefreshForTest(product: LsProduct) =

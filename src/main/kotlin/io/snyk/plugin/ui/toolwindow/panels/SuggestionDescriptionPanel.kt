@@ -1,5 +1,6 @@
 package io.snyk.plugin.ui.toolwindow.panels
 
+import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.invokeLater
 import com.intellij.openapi.diagnostic.logger
@@ -25,10 +26,13 @@ import org.jetbrains.annotations.TestOnly
 import snyk.common.lsp.ScanIssue
 
 class SuggestionDescriptionPanel(val project: Project, private val issue: ScanIssue) :
-  JPanel(BorderLayout()), IssueDescriptionPanel {
+  JPanel(BorderLayout()), IssueDescriptionPanel, Disposable {
   private val logger = logger<SuggestionDescriptionPanel>()
+  private var jbCefBrowser: com.intellij.ui.jcef.JBCefBrowser? = null
   private val unexpectedErrorMessage =
     "Snyk encountered an issue while rendering the vulnerability description. Please try again, or contact support if the problem persists. We apologize for any inconvenience caused."
+
+  @Volatile private var isDisposed = false
 
   // Used by tests to check if async initialization is complete
   @Volatile private var initialized = false
@@ -55,8 +59,8 @@ class SuggestionDescriptionPanel(val project: Project, private val issue: ScanIs
     logger.debug("SuggestionDescriptionPanel: scheduling background task for issue details")
     ApplicationManager.getApplication().executeOnPooledThread {
       logger.debug("SuggestionDescriptionPanel: background task starting")
-      if (project.isDisposed) {
-        logger.debug("SuggestionDescriptionPanel: project disposed, aborting")
+      if (isDisposed || project.isDisposed) {
+        logger.debug("SuggestionDescriptionPanel: disposed or project disposed, aborting")
         return@executeOnPooledThread
       }
 
@@ -71,8 +75,8 @@ class SuggestionDescriptionPanel(val project: Project, private val issue: ScanIs
       logger.debug("SuggestionDescriptionPanel: scheduling invokeLater for browser initialization")
       invokeLater {
         logger.debug("SuggestionDescriptionPanel: invokeLater executing")
-        if (project.isDisposed) {
-          logger.debug("SuggestionDescriptionPanel: project disposed in invokeLater, aborting")
+        if (isDisposed || project.isDisposed) {
+          logger.debug("SuggestionDescriptionPanel: disposed in invokeLater, aborting")
           return@invokeLater
         }
         initializeBrowser(issueDetails)
@@ -115,7 +119,8 @@ class SuggestionDescriptionPanel(val project: Project, private val issue: ScanIs
     logger.debug("SuggestionDescriptionPanel: getting formatted HTML")
     val html = PanelHTMLUtils.getFormattedHtml(issueDetails)
     logger.debug("SuggestionDescriptionPanel: creating JCEF browser")
-    val jbCefBrowser = JCEFUtils.getJBCefBrowserIfSupported(html, loadHandlerGenerators)
+    jbCefBrowser = JCEFUtils.getJBCefBrowserIfSupported(html, loadHandlerGenerators)
+    val jbCefBrowser = jbCefBrowser
     logger.debug("SuggestionDescriptionPanel: JCEF browser created, isNull=${jbCefBrowser == null}")
 
     // Remove loading panel and show actual content
@@ -141,5 +146,11 @@ class SuggestionDescriptionPanel(val project: Project, private val issue: ScanIs
     this.repaint()
     logger.debug("SuggestionDescriptionPanel: initializeBrowser completed")
     initialized = true
+  }
+
+  override fun dispose() {
+    isDisposed = true
+    jbCefBrowser?.dispose()
+    jbCefBrowser = null
   }
 }
