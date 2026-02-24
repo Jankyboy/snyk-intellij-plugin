@@ -8,6 +8,7 @@ import com.intellij.openapi.components.service
 import com.intellij.openapi.options.SearchableConfigurable
 import com.intellij.openapi.progress.runBackgroundableTask
 import com.intellij.openapi.project.Project
+import com.intellij.util.execution.ParametersListUtil
 import io.snyk.plugin.events.SnykProductsOrSeverityListener
 import io.snyk.plugin.events.SnykResultsFilteringListener
 import io.snyk.plugin.events.SnykSettingsListener
@@ -111,8 +112,6 @@ class SnykProjectSettingsConfigurable(val project: Project) : SearchableConfigur
     }
 
     val rescanNeeded = isCoreParamsModified()
-    val productSelectionChanged = snykSettingsDialog.isScanTypeChanged()
-    val severitySelectionChanged = snykSettingsDialog.isSeverityEnablementChanged()
 
     if (isCustomEndpointModified()) {
       settingsStateService.customEndpointUrl = customEndpoint
@@ -235,7 +234,7 @@ fun applyFolderConfigChanges(
 
   val updatedConfig =
     existingConfig.copy(
-      additionalParameters = additionalParameters.split(" ", System.lineSeparator()),
+      additionalParameters = ParametersListUtil.parse(additionalParameters),
       // Clear the preferredOrg field if the auto org selection is enabled.
       preferredOrg = if (autoSelectOrgEnabled) "" else preferredOrgText.trim(),
       orgSetByUser = !autoSelectOrgEnabled,
@@ -272,7 +271,7 @@ fun handleReleaseChannelChange(project: Project) {
   if (!pluginSettings().manageBinariesAutomatically) return
 
   ApplicationManager.getApplication().invokeLater {
-    @Suppress("CanBeVal") var notification: Notification? = null
+    var notification: Notification? = null
     val downloadAction =
       object : AnAction("Download") {
         override fun actionPerformed(e: AnActionEvent) {
@@ -287,7 +286,6 @@ fun handleReleaseChannelChange(project: Project) {
           notification?.expire()
         }
       }
-    @Suppress("AssignedValueIsNeverRead")
     notification =
       SnykBalloonNotificationHelper.showInfo(
         "You changed the release channel. Would you like to download a new Snyk CLI now?",

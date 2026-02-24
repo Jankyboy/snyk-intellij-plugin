@@ -99,7 +99,7 @@ class SnykLanguageClient(private val project: Project, val progressManager: Prog
     val filePath = diagnosticsParams.uri
 
     // Run async to avoid blocking the LSP message thread
-    org.jetbrains.concurrency.runAsync {
+    runAsync {
       try {
         getSyncPublisher(project, SnykScanListener.SNYK_SCAN_TOPIC)?.let {
           updateCache(project, filePath, diagnosticsParams, it)
@@ -129,11 +129,29 @@ class SnykLanguageClient(private val project: Project, val progressManager: Prog
     val firstDiagnostic = diagnosticsParams.diagnostics.firstOrNull()
     val product = firstDiagnostic?.source
 
-    // If the diagnostics for the file is empty, clear the cache.
+    // If the diagnostics for the file is empty, we only want to clear the cache for the product
+    // that sent it.
+    // However, if we don't know the product, we have to clear everything.
     if (firstDiagnostic == null) {
-      scanPublisher.onPublishDiagnostics(LsProduct.Code, snykFile, emptySet())
-      scanPublisher.onPublishDiagnostics(LsProduct.OpenSource, snykFile, emptySet())
-      scanPublisher.onPublishDiagnostics(LsProduct.InfrastructureAsCode, snykFile, emptySet())
+      // The language server sends empty diagnostics per product when it has finished a scan and
+      // did not find anything.If the product is contained in the version of the file, use it to
+      // clean only the product cache
+      when (diagnosticsParams.version) {
+        LsProduct.OpenSource.ordinal ->
+          scanPublisher.onPublishDiagnostics(LsProduct.OpenSource, snykFile, emptySet())
+        LsProduct.Code.ordinal ->
+          scanPublisher.onPublishDiagnostics(LsProduct.Code, snykFile, emptySet())
+        LsProduct.InfrastructureAsCode.ordinal ->
+          scanPublisher.onPublishDiagnostics(LsProduct.InfrastructureAsCode, snykFile, emptySet())
+        LsProduct.Secrets.ordinal ->
+          scanPublisher.onPublishDiagnostics(LsProduct.Secrets, snykFile, emptySet())
+        else -> {
+          scanPublisher.onPublishDiagnostics(LsProduct.Code, snykFile, emptySet())
+          scanPublisher.onPublishDiagnostics(LsProduct.OpenSource, snykFile, emptySet())
+          scanPublisher.onPublishDiagnostics(LsProduct.InfrastructureAsCode, snykFile, emptySet())
+          scanPublisher.onPublishDiagnostics(LsProduct.Secrets, snykFile, emptySet())
+        }
+      }
       return
     }
 
@@ -224,7 +242,7 @@ class SnykLanguageClient(private val project: Project, val progressManager: Prog
   fun snykScan(snykScan: SnykScanParams) {
     if (disposed) return
     // Run async to avoid blocking the LSP message thread
-    org.jetbrains.concurrency.runAsync {
+    runAsync {
       try {
         getSyncPublisher(project, SnykScanListener.SNYK_SCAN_TOPIC)?.let {
           processSnykScan(snykScan, it)
@@ -241,6 +259,7 @@ class SnykLanguageClient(private val project: Project, val progressManager: Prog
         LsProduct.Code -> ProductType.CODE_SECURITY
         LsProduct.OpenSource -> ProductType.OSS
         LsProduct.InfrastructureAsCode -> ProductType.IAC
+        LsProduct.Secrets -> ProductType.SECRETS
         else -> return
       }
     val key = ScanInProgressKey(snykScan.folderPath.toVirtualFile(), product)
@@ -268,7 +287,10 @@ class SnykLanguageClient(private val project: Project, val progressManager: Prog
       LsProduct.OpenSource -> scanPublisher.scanningOssFinished()
       LsProduct.Code -> scanPublisher.scanningSnykCodeFinished()
       LsProduct.InfrastructureAsCode -> scanPublisher.scanningIacFinished()
-      LsProduct.Unknown -> Unit
+      LsProduct.Secrets -> Unit // no need to refresh the old tree, we use the HTML tree view
+      LsProduct.Unknown -> {
+        logger.warn("Received scan completion for unknown product type: ${snykScan.product}")
+      }
     }
   }
 
@@ -451,6 +473,7 @@ class SnykLanguageClient(private val project: Project, val progressManager: Prog
           LsProduct.Code -> ProductType.CODE_SECURITY
           LsProduct.OpenSource -> ProductType.OSS
           LsProduct.InfrastructureAsCode -> ProductType.IAC
+          LsProduct.Secrets -> ProductType.SECRETS
           else -> null
         }
 
