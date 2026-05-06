@@ -47,3 +47,21 @@ Thumbs.db
 .cursor/rules/snyk_rules.mdc
 docs/performance-analysis.md
 IDE-*
+
+# Claude Code (machine-specific, not shared)
+CLAUDE.md
+.claude/
+
+# Local test output artifacts
+tests.json
+test-output.txt
+
+.vault
+.kotlin
+.vscode
+.windsurf
+.cursor
+
+ARCHITECTURE.md
+BUSINESS.md
+DESIGN.md

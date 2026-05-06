@@ -6,6 +6,7 @@ import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.project.Project
 import com.intellij.psi.PsiFile
 import io.snyk.plugin.Severity
+import io.snyk.plugin.events.SnykFolderConfigListener
 import io.snyk.plugin.events.SnykProductsOrSeverityListener
 import io.snyk.plugin.events.SnykSettingsListener
 import io.snyk.plugin.isCliInstalled
@@ -40,8 +41,9 @@ class AnnotatorCommon(val project: Project) {
     // https://github.com/snyk/snyk-intellij-plugin/issues/324
   }
 
-  fun isSeverityToShow(severity: Severity): Boolean =
-    pluginSettings().hasSeverityEnabled(severity) || severity == Severity.UNKNOWN
+  fun isSeverityToShow(severity: Severity, psiFile: PsiFile): Boolean =
+    severity == Severity.UNKNOWN ||
+      pluginSettings().hasSeverityEnabledForFile(severity, psiFile.virtualFile, project)
 
   fun initRefreshing() {
     if (project.isDisposed) return
@@ -63,6 +65,16 @@ class AnnotatorCommon(val project: Project) {
         SnykSettingsListener.SNYK_SETTINGS_TOPIC,
         object : SnykSettingsListener {
           override fun settingsChanged() {
+            refreshAnnotationsForOpenFiles(project)
+          }
+        },
+      )
+    project.messageBus
+      .connect()
+      .subscribe(
+        SnykFolderConfigListener.SNYK_FOLDER_CONFIG_TOPIC,
+        object : SnykFolderConfigListener {
+          override fun folderConfigsChanged(folderConfigsNotEmpty: Boolean) {
             refreshAnnotationsForOpenFiles(project)
           }
         },

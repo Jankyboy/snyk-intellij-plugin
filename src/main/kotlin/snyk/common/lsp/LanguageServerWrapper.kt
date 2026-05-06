@@ -1,24 +1,32 @@
 package snyk.common.lsp
 
 import com.google.gson.Gson
+import com.intellij.notification.NotificationAction
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
 import com.intellij.openapi.diagnostic.Logger
+import com.intellij.openapi.options.ShowSettingsUtil
 import com.intellij.openapi.project.DumbService
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.Disposer
 import com.intellij.openapi.util.io.toNioPathOrNull
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.util.concurrency.AppExecutorUtil
+import io.snyk.plugin.events.SnykProductsOrSeverityListener
+import io.snyk.plugin.events.SnykResultsFilteringListener
+import io.snyk.plugin.events.SnykSettingsListener
 import io.snyk.plugin.fromUriToPath
 import io.snyk.plugin.getCliFile
 import io.snyk.plugin.getContentRootVirtualFiles
 import io.snyk.plugin.getSnykTaskQueueService
 import io.snyk.plugin.getWaitForResultsTimeout
 import io.snyk.plugin.pluginSettings
+import io.snyk.plugin.publishAsync
 import io.snyk.plugin.runInBackground
+import io.snyk.plugin.services.SnykApplicationSettingsStateService
+import io.snyk.plugin.settings.SnykProjectSettingsConfigurable
 import io.snyk.plugin.toLanguageServerURI
 import io.snyk.plugin.ui.SnykBalloonNotificationHelper
 import io.snyk.plugin.ui.toolwindow.SnykPluginDisposable
@@ -33,6 +41,7 @@ import java.util.concurrent.TimeoutException
 import java.util.concurrent.locks.ReentrantLock
 import java.util.logging.Level
 import java.util.logging.Logger.getLogger
+import org.apache.commons.lang3.SystemUtils
 import org.eclipse.lsp4j.ClientCapabilities
 import org.eclipse.lsp4j.ClientInfo
 import org.eclipse.lsp4j.CodeActionCapabilities
@@ -76,16 +85,20 @@ import snyk.common.lsp.commands.COMMAND_WORKSPACE_CONFIGURATION
 import snyk.common.lsp.commands.COMMAND_WORKSPACE_FOLDER_SCAN
 import snyk.common.lsp.commands.SNYK_GENERATE_ISSUE_DESCRIPTION
 import snyk.common.lsp.progress.ProgressManager
+import snyk.common.lsp.settings.ConfigSetting
 import snyk.common.lsp.settings.FolderConfigSettings
-import snyk.common.lsp.settings.IssueViewOptions
-import snyk.common.lsp.settings.LanguageServerSettings
-import snyk.common.lsp.settings.SeverityFilter
+import snyk.common.lsp.settings.InitializationOptions
+import snyk.common.lsp.settings.LsFolderSettingsKeys
+import snyk.common.lsp.settings.LsSettingsKeys
+import snyk.common.lsp.settings.LspConfigurationParam
+import snyk.common.lsp.settings.LspFolderConfig
 import snyk.common.removeSuffix
 import snyk.pluginInfo
 import snyk.trust.WorkspaceTrustService
 import snyk.trust.confirmScanningAndSetWorkspaceTrustedStateIfNeeded
 
 private const val INITIALIZATION_TIMEOUT = 20L
+private const val PROTOCOL_VERSION_CHECK_TIMEOUT_SECONDS = 10L
 
 @Service(Service.Level.PROJECT)
 class LanguageServerWrapper(private val project: Project) : Disposable {
@@ -99,6 +112,7 @@ class LanguageServerWrapper(private val project: Project) : Disposable {
   private var authenticatedUser: Map<String, String>? = null
   private var initializeResult: InitializeResult? = null
   private var cliNotFoundWarningDisplayed: Boolean = false
+  private var protocolVersionWarningDisplayed: Boolean = false
   private val gson = Gson()
   private var loginFuture: CompletableFuture<Any>? = null
 
@@ -156,6 +170,28 @@ class LanguageServerWrapper(private val project: Project) : Disposable {
         logger.warn("Failed to set executable permission on CLI: ${e.message}")
         return
       }
+    }
+
+    if (!verifyCliProtocolVersion()) {
+      val required = pluginSettings().requiredLsProtocolVersion
+      val message =
+        "Snyk CLI at $cliPath does not support the required Language Server protocol " +
+          "version ($required). The Snyk Language Server will not be started. " +
+          "Please update the Snyk CLI."
+      logger.warn(message)
+      if (!protocolVersionWarningDisplayed) {
+        val openSettingsAction =
+          NotificationAction.createSimpleExpiring("Open Snyk settings") {
+            ApplicationManager.getApplication().invokeLater {
+              if (project.isDisposed) return@invokeLater
+              ShowSettingsUtil.getInstance()
+                .showSettingsDialog(project, SnykProjectSettingsConfigurable::class.java)
+            }
+          }
+        SnykBalloonNotificationHelper.showWarn(message, project, openSettingsAction)
+        protocolVersionWarningDisplayed = true
+      }
+      return
     }
 
     try {
@@ -227,6 +263,50 @@ class LanguageServerWrapper(private val project: Project) : Disposable {
       logger.error("Initialization of Snyk Language Server for ${project.name} failed", e)
       isInitialized = false
       if (processIsAlive()) process.destroyForcibly()
+    }
+  }
+
+  /**
+   * Invokes the CLI binary with `language-server --protocolVersion` and verifies the printed
+   * protocol version matches the plugin's required Language Server protocol version. The check is
+   * fail-closed: any error (timeout, non-zero exit, missing flag, parse failure) causes this method
+   * to return false so that the LS will not be started.
+   */
+  internal fun verifyCliProtocolVersion(): Boolean {
+    val ps = pluginSettings()
+    val required = ps.requiredLsProtocolVersion
+    return try {
+      val processBuilder = ProcessBuilder(cliPath, "language-server", "--protocolVersion")
+      processBuilder.redirectErrorStream(false)
+      val p = processBuilder.start()
+      val output = p.inputStream.bufferedReader().use { it.readText() }
+      val finished = p.waitFor(PROTOCOL_VERSION_CHECK_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+      if (!finished) {
+        p.destroyForcibly()
+        logger.warn(
+          "CLI protocol version check timed out after $PROTOCOL_VERSION_CHECK_TIMEOUT_SECONDS seconds"
+        )
+        return false
+      }
+      val exit = p.exitValue()
+      if (exit != 0) {
+        logger.warn("CLI protocol version check exited with code $exit, output='$output'")
+        return false
+      }
+      val parsed = output.trim().toIntOrNull()
+      if (parsed == null) {
+        logger.warn("CLI protocol version check returned non-integer output: '$output'")
+        return false
+      }
+      ps.currentLSProtocolVersion = parsed
+      val matches = parsed == required
+      if (!matches) {
+        logger.warn("CLI protocol version mismatch: cli=$parsed required=$required")
+      }
+      matches
+    } catch (e: Exception) {
+      logger.warn("Failed to invoke CLI for protocol version check: ${e.message}", e)
+      false
     }
   }
 
@@ -325,7 +405,7 @@ class LanguageServerWrapper(private val project: Project) : Disposable {
     params.processId = ProcessHandle.current().pid().toInt()
     params.clientInfo =
       ClientInfo(pluginInfo.integrationEnvironment, pluginInfo.integrationEnvironmentVersion)
-    params.initializationOptions = getSettings()
+    params.initializationOptions = getInitializationOptions()
     params.capabilities = getCapabilities()
 
     initializeResult =
@@ -532,13 +612,202 @@ class LanguageServerWrapper(private val project: Project) : Disposable {
     }
   }
 
-  fun getSettings(): LanguageServerSettings {
+  fun getSettings(): LspConfigurationParam {
     val ps = pluginSettings()
 
-    // only send folderConfig after having received the folderConfigs from LS
-    // IntelliJ only has in-memory storage, so that storage should not overwrite
-    // the folderConfigs in language server
-    val folderConfigs =
+    // Machine-scope settings (top-level settings map → user:global)
+    val settingsMap = mutableMapOf<String, ConfigSetting>()
+
+    settingsMap[LsSettingsKeys.PROXY_INSECURE] =
+      ConfigSetting(
+        value = ps.ignoreUnknownCA,
+        changed = ps.lsUserAssertedChangeForLsConfigurationKey(LsSettingsKeys.PROXY_INSECURE),
+      )
+
+    val endpoint = getEndpointUrl()
+    if (!endpoint.isNullOrBlank()) {
+      settingsMap[LsSettingsKeys.API_ENDPOINT] =
+        ConfigSetting(
+          value = endpoint,
+          changed = ps.lsUserAssertedChangeForLsConfigurationKey(LsSettingsKeys.API_ENDPOINT),
+        )
+    }
+
+    if (ps.organization != null) {
+      settingsMap[LsSettingsKeys.ORGANIZATION] =
+        ConfigSetting(
+          value = ps.organization!!,
+          changed = ps.lsUserAssertedChangeForLsConfigurationKey(LsSettingsKeys.ORGANIZATION),
+        )
+    }
+
+    settingsMap[LsSettingsKeys.AUTOMATIC_DOWNLOAD] =
+      ConfigSetting(
+        value = ps.manageBinariesAutomatically,
+        changed = ps.lsUserAssertedChangeForLsConfigurationKey(LsSettingsKeys.AUTOMATIC_DOWNLOAD),
+      )
+
+    val currentCliPath = getCliFile().absolutePath
+    if (currentCliPath.isNotBlank()) {
+      settingsMap[LsSettingsKeys.CLI_PATH] =
+        ConfigSetting(
+          value = currentCliPath,
+          changed = ps.lsUserAssertedChangeForLsConfigurationKey(LsSettingsKeys.CLI_PATH),
+        )
+    }
+
+    if (!ps.cliBaseDownloadURL.isNullOrBlank()) {
+      settingsMap[LsSettingsKeys.BINARY_BASE_URL] =
+        ConfigSetting(
+          value = ps.cliBaseDownloadURL,
+          changed = ps.lsUserAssertedChangeForLsConfigurationKey(LsSettingsKeys.BINARY_BASE_URL),
+        )
+    }
+
+    settingsMap[LsSettingsKeys.CLI_RELEASE_CHANNEL] =
+      ConfigSetting(
+        value = ps.cliReleaseChannel,
+        changed = ps.lsUserAssertedChangeForLsConfigurationKey(LsSettingsKeys.CLI_RELEASE_CHANNEL),
+      )
+
+    settingsMap[LsSettingsKeys.AUTHENTICATION_METHOD] =
+      ConfigSetting(
+        value = ps.authenticationType.languageServerSettingsName,
+        changed = ps.lsUserAssertedChangeForLsConfigurationKey(LsSettingsKeys.AUTHENTICATION_METHOD),
+      )
+
+    settingsMap[LsSettingsKeys.TRUST_ENABLED] = ConfigSetting(value = false, changed = true)
+    settingsMap[LsSettingsKeys.AUTOMATIC_AUTHENTICATION] =
+      ConfigSetting(value = false, changed = true)
+
+    settingsMap[LsSettingsKeys.FORMAT] = ConfigSetting(value = "html", changed = true)
+    settingsMap[LsSettingsKeys.HOVER_VERBOSITY] = ConfigSetting(value = 0, changed = true)
+    settingsMap[LsSettingsKeys.CLIENT_PROTOCOL_VERSION] =
+      ConfigSetting(value = ps.requiredLsProtocolVersion, changed = true)
+    settingsMap[LsSettingsKeys.DEVICE_ID] =
+      ConfigSetting(value = ps.userAnonymousId, changed = true)
+    settingsMap[LsSettingsKeys.OS_PLATFORM] =
+      ConfigSetting(value = SystemUtils.OS_NAME, changed = true)
+    settingsMap[LsSettingsKeys.OS_ARCH] = ConfigSetting(value = SystemUtils.OS_ARCH, changed = true)
+    settingsMap[LsSettingsKeys.RUNTIME_NAME] =
+      ConfigSetting(value = SystemUtils.JAVA_RUNTIME_NAME, changed = true)
+    settingsMap[LsSettingsKeys.RUNTIME_VERSION] =
+      ConfigSetting(value = SystemUtils.JAVA_VERSION, changed = true)
+
+    val trustService = service<WorkspaceTrustService>()
+    val trustedPaths = trustService.settings.getTrustedPaths()
+    settingsMap[LsSettingsKeys.TRUSTED_FOLDERS] =
+      ConfigSetting(
+        value = trustedPaths,
+        changed =
+          ps.lsUserAssertedChangeForLsConfigurationKey(LsSettingsKeys.TRUSTED_FOLDERS, trustedPaths),
+      )
+
+    // Write-only settings (IDE → LS only, never sent back by LS)
+    if (!ps.token.isNullOrBlank()) {
+      settingsMap[LsSettingsKeys.TOKEN] = ConfigSetting(value = ps.token!!, changed = true)
+    }
+    settingsMap[LsSettingsKeys.SEND_ERROR_REPORTS] = ConfigSetting(value = true, changed = false)
+    settingsMap[LsSettingsKeys.ENABLE_SNYK_OSS_QUICK_FIX_CODE_ACTIONS] =
+      ConfigSetting(value = true, changed = false)
+    settingsMap[LsSettingsKeys.ENABLE_SNYK_OPEN_BROWSER_ACTIONS] =
+      ConfigSetting(value = true, changed = false)
+
+    // Folder-scope settings sent as user:global defaults
+    settingsMap[LsFolderSettingsKeys.SNYK_CODE_ENABLED] =
+      ConfigSetting(
+        value = ps.snykCodeSecurityIssuesScanEnable,
+        changed =
+          ps.lsUserAssertedChangeForLsConfigurationKey(LsFolderSettingsKeys.SNYK_CODE_ENABLED),
+      )
+    settingsMap[LsFolderSettingsKeys.SNYK_OSS_ENABLED] =
+      ConfigSetting(
+        value = ps.ossScanEnable,
+        changed =
+          ps.lsUserAssertedChangeForLsConfigurationKey(LsFolderSettingsKeys.SNYK_OSS_ENABLED),
+      )
+    settingsMap[LsFolderSettingsKeys.SNYK_IAC_ENABLED] =
+      ConfigSetting(
+        value = ps.iacScanEnabled,
+        changed =
+          ps.lsUserAssertedChangeForLsConfigurationKey(LsFolderSettingsKeys.SNYK_IAC_ENABLED),
+      )
+    settingsMap[LsFolderSettingsKeys.SNYK_SECRETS_ENABLED] =
+      ConfigSetting(
+        value = ps.secretsEnabled,
+        changed =
+          ps.lsUserAssertedChangeForLsConfigurationKey(LsFolderSettingsKeys.SNYK_SECRETS_ENABLED),
+      )
+
+    settingsMap[LsFolderSettingsKeys.SEVERITY_FILTER_CRITICAL] =
+      ConfigSetting(
+        value = ps.criticalSeverityEnabled,
+        changed =
+          ps.lsUserAssertedChangeForLsConfigurationKey(
+            LsFolderSettingsKeys.SEVERITY_FILTER_CRITICAL
+          ),
+      )
+    settingsMap[LsFolderSettingsKeys.SEVERITY_FILTER_HIGH] =
+      ConfigSetting(
+        value = ps.highSeverityEnabled,
+        changed =
+          ps.lsUserAssertedChangeForLsConfigurationKey(LsFolderSettingsKeys.SEVERITY_FILTER_HIGH),
+      )
+    settingsMap[LsFolderSettingsKeys.SEVERITY_FILTER_MEDIUM] =
+      ConfigSetting(
+        value = ps.mediumSeverityEnabled,
+        changed =
+          ps.lsUserAssertedChangeForLsConfigurationKey(LsFolderSettingsKeys.SEVERITY_FILTER_MEDIUM),
+      )
+    settingsMap[LsFolderSettingsKeys.SEVERITY_FILTER_LOW] =
+      ConfigSetting(
+        value = ps.lowSeverityEnabled,
+        changed =
+          ps.lsUserAssertedChangeForLsConfigurationKey(LsFolderSettingsKeys.SEVERITY_FILTER_LOW),
+      )
+
+    if (ps.riskScoreThreshold != null) {
+      settingsMap[LsFolderSettingsKeys.RISK_SCORE_THRESHOLD] =
+        ConfigSetting(
+          value = ps.riskScoreThreshold!!,
+          changed =
+            ps.lsUserAssertedChangeForLsConfigurationKey(LsFolderSettingsKeys.RISK_SCORE_THRESHOLD),
+        )
+    }
+
+    settingsMap[LsFolderSettingsKeys.ISSUE_VIEW_OPEN_ISSUES] =
+      ConfigSetting(
+        value = ps.openIssuesEnabled,
+        changed =
+          ps.lsUserAssertedChangeForLsConfigurationKey(LsFolderSettingsKeys.ISSUE_VIEW_OPEN_ISSUES),
+      )
+    settingsMap[LsFolderSettingsKeys.ISSUE_VIEW_IGNORED_ISSUES] =
+      ConfigSetting(
+        value = ps.ignoredIssuesEnabled,
+        changed =
+          ps.lsUserAssertedChangeForLsConfigurationKey(
+            LsFolderSettingsKeys.ISSUE_VIEW_IGNORED_ISSUES
+          ),
+      )
+    settingsMap[LsFolderSettingsKeys.SCAN_AUTOMATIC] =
+      ConfigSetting(
+        value = ps.scanOnSave,
+        changed = ps.lsUserAssertedChangeForLsConfigurationKey(LsFolderSettingsKeys.SCAN_AUTOMATIC),
+      )
+    settingsMap[LsFolderSettingsKeys.SCAN_NET_NEW] =
+      ConfigSetting(
+        value = ps.isDeltaFindingsEnabled(),
+        changed = ps.lsUserAssertedChangeForLsConfigurationKey(LsFolderSettingsKeys.SCAN_NET_NEW),
+      )
+
+    // Emit one-shot reset signals for keys the user cleared
+    val resets = ps.consumePendingResets()
+    for (key in resets) {
+      settingsMap[key] = ConfigSetting(value = null, changed = true)
+    }
+
+    // Build folder configs (folder-specific settings only, e.g. base_branch, preferred_org)
+    val folderConfigsList =
       configuredWorkspaceFolders
         .filter {
           val folderPath = it.uri.fromUriToPath().toString()
@@ -546,46 +815,53 @@ class LanguageServerWrapper(private val project: Project) : Disposable {
         }
         .map {
           val folderPath = it.uri.fromUriToPath().toString()
-          service<FolderConfigSettings>().getFolderConfig(folderPath)
+          val config = service<FolderConfigSettings>().getFolderConfig(folderPath)
+          applyPersistedFolderChangedFlags(config, ps)
         }
         .toList()
 
+    return LspConfigurationParam(settings = settingsMap, folderConfigs = folderConfigsList)
+  }
+
+  private fun applyPersistedFolderChangedFlags(
+    config: LspFolderConfig,
+    ps: SnykApplicationSettingsStateService,
+  ): LspFolderConfig {
+    val settings = config.settings ?: return config
+    val enriched =
+      settings.mapValues { (key, setting) ->
+        val isUserOverride = ps.isExplicitlyChanged(config.folderPath, key)
+        if (isUserOverride != (setting.changed == true)) {
+          setting.copy(changed = isUserOverride)
+        } else {
+          setting
+        }
+      }
+    return config.copy(settings = enriched)
+  }
+
+  fun getInitializationOptions(): InitializationOptions {
+    val ps = pluginSettings()
     val trustService = service<WorkspaceTrustService>()
     val trustedFolders = trustService.settings.getTrustedPaths()
 
-    return LanguageServerSettings(
-      activateSnykOpenSource = ps.ossScanEnable.toString(),
-      activateSnykCodeSecurity = ps.snykCodeSecurityIssuesScanEnable.toString(),
-      activateSnykIac = ps.iacScanEnabled.toString(),
-      activateSnykSecrets = ps.secretsEnabled.toString(),
-      organization = ps.organization ?: "",
-      insecure = ps.ignoreUnknownCA.toString(),
-      endpoint = getEndpointUrl(),
-      cliPath = getCliFile().absolutePath,
-      cliBaseDownloadURL = ps.cliBaseDownloadURL,
-      manageBinariesAutomatically = ps.manageBinariesAutomatically.toString(),
-      token = ps.token,
-      filterSeverity =
-        SeverityFilter(
-          critical = ps.criticalSeverityEnabled,
-          high = ps.highSeverityEnabled,
-          medium = ps.mediumSeverityEnabled,
-          low = ps.lowSeverityEnabled,
-        ),
-      issueViewOptions =
-        IssueViewOptions(
-          openIssues = ps.openIssuesEnabled,
-          ignoredIssues = ps.ignoredIssuesEnabled,
-        ),
-      enableTrustedFoldersFeature = "false",
-      scanningMode = if (!ps.scanOnSave) "manual" else "auto",
+    val param = getSettings()
+
+    return InitializationOptions(
+      settings = param.settings,
+      folderConfigs = param.folderConfigs,
+      requiredProtocolVersion = ps.requiredLsProtocolVersion.toString(),
+      deviceId = ps.userAnonymousId,
       integrationName = pluginInfo.integrationName,
       integrationVersion = pluginInfo.integrationVersion,
-      authenticationMethod = ps.authenticationType.languageServerSettingsName,
-      enableSnykOSSQuickFixCodeActions = "true",
-      folderConfigs = folderConfigs,
+      osPlatform = SystemUtils.OS_NAME,
+      osArch = SystemUtils.OS_ARCH,
+      runtimeVersion = SystemUtils.JAVA_VERSION,
+      runtimeName = SystemUtils.JAVA_RUNTIME_NAME,
+      hoverVerbosity = 0,
+      outputFormat = "html",
+      path = null,
       trustedFolders = trustedFolders,
-      riskScoreThreshold = ps.riskScoreThreshold,
     )
   }
 
@@ -594,8 +870,22 @@ class LanguageServerWrapper(private val project: Project) : Disposable {
     val params = DidChangeConfigurationParams(getSettings())
     languageServer.workspaceService.didChangeConfiguration(params)
 
+    // Notify listeners locally so the tool window tree, severity toolbar, and editor annotators
+    // refresh immediately rather than waiting on snyk-ls to echo a `$/snyk.configuration`
+    // notification back. Idempotent w.r.t. any later inbound config from the LS.
+    publishConfigurationChanged()
+
     if (runScan && pluginSettings().scanOnSave) {
       sendScanCommand()
+    }
+  }
+
+  private fun publishConfigurationChanged() {
+    if (project.isDisposed) return
+    publishAsync(project, SnykSettingsListener.SNYK_SETTINGS_TOPIC) { settingsChanged() }
+    publishAsync(project, SnykResultsFilteringListener.SNYK_FILTERING_TOPIC) { filtersChanged() }
+    publishAsync(project, SnykProductsOrSeverityListener.SNYK_ENABLEMENT_TOPIC) {
+      enablementChanged()
     }
   }
 
